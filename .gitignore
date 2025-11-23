@@ -1,0 +1,25 @@
+# Build artifacts
+bin/
+build/
+*.o
+*.out
+
+# Local storage and runtime directories
+storage/
+tmp/
+
+# Personal or security-sensitive files (store actual copies under private/ submodule)
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+.env
+.env.*
+secrets/
+*.log
+*.swp
+*.swo
+
+# Allow sensitive assets to exist inside private/ (private submodule)
+!private/**
