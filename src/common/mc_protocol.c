@@ -26,7 +26,7 @@ static uint64_t mc_ntohll(uint64_t value) {
 }
 
 static int mc_is_valid_command(mc_command_t command) {
-    return command >= MC_CMD_UPLOAD && command <= MC_CMD_QUIT;
+    return command >= MC_CMD_ERROR && command <= MC_CMD_QUIT;
 }
 
 int mc_build_header(mc_packet_header_t *out,

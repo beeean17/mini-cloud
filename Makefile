@@ -5,6 +5,7 @@ BIN_DIR := bin
 
 SRC_COMMON      := src/common/mc_protocol.c
 SRC_SERVER      := src/server/mc_server.c src/server/main.c
+SRC_CLIENT      := src/client/mc_client.c src/client/main.c
 SRC_PROTOCOL_T  := tests/protocol_demo.c
 SRC_SMOKE_CLIENT:= tests/smoke_client.c
 
@@ -12,8 +13,9 @@ COMMON_OBJS := $(OBJ_DIR)/mc_protocol.o
 SERVER_OBJS := $(COMMON_OBJS) $(OBJ_DIR)/mc_server.o $(OBJ_DIR)/server_main.o
 PROTO_OBJS  := $(COMMON_OBJS) $(OBJ_DIR)/protocol_demo.o
 SMOKE_OBJS  := $(COMMON_OBJS) $(OBJ_DIR)/smoke_client.o
+CLIENT_OBJS := $(COMMON_OBJS) $(OBJ_DIR)/mc_client.o $(OBJ_DIR)/client_main.o
 
-.PHONY: all clean test-protocol test-server server
+.PHONY: all clean test-protocol test-server test-client test-stress server client
 
 all: test-protocol
 
@@ -32,6 +34,12 @@ $(OBJ_DIR)/mc_server.o: src/server/mc_server.c | $(OBJ_DIR)
 $(OBJ_DIR)/server_main.o: src/server/main.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ_DIR)/mc_client.o: src/client/mc_client.c | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/client_main.o: src/client/main.c | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(OBJ_DIR)/protocol_demo.o: tests/protocol_demo.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -47,10 +55,15 @@ $(BIN_DIR)/server: $(SERVER_OBJS) | $(BIN_DIR)
 $(BIN_DIR)/smoke_client: $(SMOKE_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(BIN_DIR)/client: $(CLIENT_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
+
 test-protocol: $(BIN_DIR)/protocol_demo
 	./$(BIN_DIR)/protocol_demo
 
 server: $(BIN_DIR)/server
+
+client: $(BIN_DIR)/client
 
 test-server: $(BIN_DIR)/server $(BIN_DIR)/smoke_client
 	@bash -c 'set -euo pipefail; \
@@ -68,3 +81,24 @@ test-server: $(BIN_DIR)/server $(BIN_DIR)/smoke_client
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
+
+test-client: $(BIN_DIR)/server $(BIN_DIR)/client
+	@bash -c 'set -euo pipefail; \
+	PORT=9500; \
+	TMP_UPLOAD=$$(mktemp -t mc-upload.XXXXXX); \
+	echo "hello from client" > $$TMP_UPLOAD; \
+	BASENAME=$$(basename $$TMP_UPLOAD); \
+	./$(BIN_DIR)/server $$PORT >/tmp/mc-client-server.log 2>&1 & \
+	SERVER_PID=$$!; \
+	sleep 1; \
+	printf "LIST\nUPLOAD $$TMP_UPLOAD\nDOWNLOAD $$BASENAME\nQUIT\n" | ./$(BIN_DIR)/client 127.0.0.1 $$PORT >/tmp/mc-client.log 2>&1; \
+	kill -INT $$SERVER_PID 2>/dev/null || true; \
+	wait $$SERVER_PID 2>/dev/null || true; \
+	diff -q $$TMP_UPLOAD $$BASENAME >/tmp/mc-diff.log; \
+	echo "Client log:"; cat /tmp/mc-client.log; \
+	echo "Server log:"; cat /tmp/mc-client-server.log; \
+	echo "Diff log:"; cat /tmp/mc-diff.log; \
+	rm -f $$TMP_UPLOAD $$BASENAME /tmp/mc-client.log /tmp/mc-client-server.log /tmp/mc-diff.log'
+
+test-stress:
+	@tests/multi_client.sh

@@ -20,6 +20,7 @@ extern "C" {
  * Commands supported by the Mini Cloud protocol.
  */
 typedef enum {
+    MC_CMD_ERROR = 0,
     MC_CMD_UPLOAD = 1,
     MC_CMD_DOWNLOAD = 2,
     MC_CMD_LIST = 3,
