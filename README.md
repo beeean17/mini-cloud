@@ -50,10 +50,26 @@ make test-stress
 
 `tests/multi_client.sh`가 여러 클라이언트를 병렬로 띄워 반복적으로 `UPLOAD → DOWNLOAD → LIST → QUIT` 시퀀스를 수행합니다. 환경 변수 `CLIENTS`, `ROUNDS`, `PORT`로 부하 수준을 조절할 수 있으며, 실패 시 서버/클라이언트 로그가 출력됩니다.
 
+## 보안·설정 관리
+
+- **공유 토큰 인증**: 서버 실행 전에 `MC_SERVER_TOKEN` 또는 `MC_SERVER_TOKEN_FILE=/path/to/secret`를 지정하면 모든 클라이언트가 최초 접속 시 `AUTH` 명령을 통해 동일한 토큰을 제시해야 합니다. 클라이언트는 세 번째 인자로 직접 토큰을 넘기거나, `MC_CLIENT_TOKEN`/`MC_CLIENT_TOKEN_FILE` 환경 변수를 통해 자동으로 토큰을 전송합니다. 서버는 인증 성공 시 `MC_CMD_AUTH` 응답으로 `AUTH OK` 메시지를 돌려줍니다.
+- **업로드 용량 제한**: `MC_MAX_UPLOAD_BYTES=10485760` 처럼 설정하면 지정된 바이트 이상인 파일 업로드는 거부되어 `[SERVER ERROR] Upload exceeds limit (...)` 응답을 반환합니다. 0 또는 미설정이면 제한을 두지 않습니다.
+- **리스너 백로그/스토리지 경로**: `MC_SERVER_BACKLOG`로 `listen()` 큐 길이를, `MC_STORAGE_DIR`로 2번째 인자를 생략했을 때 사용될 기본 저장소 경로를 제어할 수 있습니다.
+- **테스트와 토큰**: `make test-server`, `make test-client`, `make test-stress`는 내부적으로 고정 토큰을 설정해 인증 경로를 항상 exercising 합니다. 필요 시 `AUTH_TOKEN`, `MAX_UPLOAD_BYTES` 등의 환경 변수로 오버라이드하세요.
+
+| 환경 변수 | 설명 |
+| --- | --- |
+| `MC_SERVER_TOKEN` / `MC_SERVER_TOKEN_FILE` | 서버 측 공유 시크릿 문자열 또는 파일 경로. 설정 시 인증 활성화. |
+| `MC_CLIENT_TOKEN` / `MC_CLIENT_TOKEN_FILE` | 클라이언트 측 토큰 제공. 서버가 토큰을 요구하지 않아도 전송 시 안전하게 무시됩니다. |
+| `MC_MAX_UPLOAD_BYTES` | 허용되는 업로드 최대 크기 (바이트). 기본 0 (제한 없음). |
+| `MC_SERVER_BACKLOG` | `listen()` 백로그 크기 (기본 16, 1–1024 허용). |
+| `MC_STORAGE_DIR` | 2번째 인자를 생략한 경우 사용할 기본 저장소 디렉터리. |
+
 ### 파일 전송 동작
 - **UPLOAD `<path>`**: 로컬 파일을 서버 `storage/` 디렉터리에 업로드합니다. 서버는 임시 파일로 수신 후 원자적으로 교체하고, 클라이언트에는 성공 메시지를 반환합니다.
 - **DOWNLOAD `<filename>`**: 서버 저장소의 파일을 요청해 현재 디렉터리에 동일한 이름으로 저장합니다. 존재하지 않는 파일은 `MC_CMD_ERROR` 응답으로 안내됩니다.
 - **LIST**: 서버 `storage/`의 파일 목록을 개행으로 구분해 돌려줍니다.
 - **QUIT**: 서버에서 연결을 정리하고 클라이언트를 종료합니다.
+- **AUTH**: 토큰이 설정된 경우 클라이언트가 접속 직후 자동으로 전송하며, 서버는 토큰 검증 후 `AUTH OK` 또는 오류를 반환합니다.
 
 민감한 설정/인증 자료는 `private/` 서브모듈에서 관리하고, 공개 레포에는 단순 샘플만 두는 것을 추천합니다.

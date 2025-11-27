@@ -118,6 +118,23 @@ static int send_download(int fd, const char *remote_name) {
     return send_header_and_filename(fd, MC_CMD_DOWNLOAD, remote_name, 0);
 }
 
+static int send_auth(int fd, const char *token) {
+    size_t len = token ? strlen(token) : 0;
+    mc_packet_header_t header;
+    if (mc_build_header(&header, MC_CMD_AUTH, NULL, len) != 0) {
+        return -1;
+    }
+    if (mc_send_header(fd, &header) != 0) {
+        return -1;
+    }
+    if (len > 0) {
+        if (mc_send_all(fd, token, len) != (ssize_t)len) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int transmit_file_payload(int socket_fd, int file_fd, uint64_t size) {
     uint8_t buffer[MC_CLIENT_READ_CHUNK];
     uint64_t remaining = size;
@@ -391,6 +408,13 @@ static int handle_server_response(int fd, const cli_request_t *req, bool *should
             return 0;
         case MC_CMD_DOWNLOAD:
             return handle_download_payload(fd, &info, req ? req->arg : NULL);
+        case MC_CMD_AUTH:
+            if (recv_payload_to_buffer(fd, payload_len, &buffer) != 0) {
+                return -1;
+            }
+            printf("[CLIENT] 서버 인증 메시지: %s\n", buffer);
+            free(buffer);
+            return 0;
         case MC_CMD_QUIT:
             if (payload_len > 0) {
                 if (recv_payload_to_buffer(fd, payload_len, &buffer) != 0) {
@@ -413,6 +437,37 @@ static int handle_server_response(int fd, const cli_request_t *req, bool *should
             }
             return 0;
     }
+}
+
+static int perform_auth_if_needed(int fd, const mc_client_config_t *config) {
+    if (!config || !config->auth_token || !config->auth_token[0]) {
+        return 0;
+    }
+
+    if (send_auth(fd, config->auth_token) != 0) {
+        return -1;
+    }
+
+    mc_packet_info_t info;
+    if (recv_packet(fd, &info) != 0) {
+        return -1;
+    }
+
+    char *payload = NULL;
+    if (recv_payload_to_buffer(fd, info.header.payload_len, &payload) != 0) {
+        return -1;
+    }
+
+    if (info.header.command == MC_CMD_AUTH) {
+        printf("[CLIENT] 서버 인증 응답: %s\n", payload && payload[0] ? payload : "AUTH OK");
+        free(payload);
+        return 0;
+    }
+
+    fprintf(stderr, "[CLIENT] 인증 실패: %s\n", payload ? payload : "(no message)");
+    free(payload);
+    errno = EACCES;
+    return -1;
 }
 
 static int command_loop(int fd) {
@@ -487,6 +542,11 @@ int mc_client_run(const mc_client_config_t *config) {
 
     int fd = connect_to_server(config);
     if (fd == -1) {
+        return -1;
+    }
+
+    if (perform_auth_if_needed(fd, config) != 0) {
+        close(fd);
         return -1;
     }
 

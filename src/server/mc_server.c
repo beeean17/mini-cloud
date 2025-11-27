@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #include <unistd.h>
 
 #define MC_STORAGE_PATH_MAX PATH_MAX
+#define MC_MAX_AUTH_TOKEN_LEN 256
 
 static volatile sig_atomic_t g_should_terminate = 0;
 
@@ -269,6 +271,13 @@ static int handle_upload_request(int client_fd,
         return send_errorf(client_fd, "Invalid filename");
     }
 
+    if (config->max_upload_bytes > 0 && info->header.payload_len > config->max_upload_bytes) {
+        drain_payload(client_fd, info->header.payload_len);
+        return send_errorf(client_fd,
+                           "Upload exceeds limit (%" PRIu64 " bytes)",
+                           (uint64_t)config->max_upload_bytes);
+    }
+
     char final_path[MC_STORAGE_PATH_MAX];
     if (build_storage_path(config, info->filename, final_path, sizeof(final_path)) != 0) {
         drain_payload(client_fd, info->header.payload_len);
@@ -422,7 +431,56 @@ static int handle_list_request(int client_fd, const mc_server_config_t *config, 
     return rc;
 }
 
+static int handle_auth_request(int client_fd,
+                               const mc_server_config_t *config,
+                               const mc_packet_info_t *info,
+                               bool *authenticated) {
+    if (!authenticated) {
+        if (info->header.payload_len > 0) {
+            drain_payload(client_fd, info->header.payload_len);
+        }
+        return send_errorf(client_fd, "Authentication state unavailable");
+    }
+
+    if (*authenticated) {
+        if (info->header.payload_len > 0) {
+            drain_payload(client_fd, info->header.payload_len);
+        }
+        return send_message(client_fd, MC_CMD_AUTH, NULL, "Already authenticated");
+    }
+
+    if (!config->auth_token || !config->auth_token[0]) {
+        if (info->header.payload_len > 0) {
+            drain_payload(client_fd, info->header.payload_len);
+        }
+        *authenticated = true;
+        return send_message(client_fd, MC_CMD_AUTH, NULL, "AUTH not required");
+    }
+
+    if (info->header.payload_len == 0 || info->header.payload_len > MC_MAX_AUTH_TOKEN_LEN) {
+        drain_payload(client_fd, info->header.payload_len);
+        return send_errorf(client_fd, "Invalid auth token length");
+    }
+
+    char token[MC_MAX_AUTH_TOKEN_LEN + 1];
+    if (mc_recv_all(client_fd, token, (size_t)info->header.payload_len) !=
+        (ssize_t)info->header.payload_len) {
+        return -1;
+    }
+    token[info->header.payload_len] = '\0';
+
+    if (strcmp(token, config->auth_token) != 0) {
+        send_errorf(client_fd, "Invalid auth token");
+        return -1;
+    }
+
+    *authenticated = true;
+    return send_message(client_fd, MC_CMD_AUTH, NULL, "AUTH OK");
+}
+
 static void handle_client(int client_fd, const struct sockaddr_in *addr, const mc_server_config_t *config) {
+    bool require_auth = config->auth_token && config->auth_token[0];
+    bool authenticated = !require_auth;
     mc_packet_info_t info;
     while (1) {
         mc_packet_header_t header;
@@ -440,6 +498,16 @@ static void handle_client(int client_fd, const struct sockaddr_in *addr, const m
 
         log_client_command(addr, &info);
 
+        if (!authenticated && info.header.command != MC_CMD_AUTH) {
+            if (info.header.payload_len > 0) {
+                drain_payload(client_fd, info.header.payload_len);
+            }
+            if (send_errorf(client_fd, "Authentication required") != 0) {
+                break;
+            }
+            continue;
+        }
+
         int handler_rc = 0;
         switch (info.header.command) {
             case MC_CMD_UPLOAD:
@@ -450,6 +518,9 @@ static void handle_client(int client_fd, const struct sockaddr_in *addr, const m
                 break;
             case MC_CMD_LIST:
                 handler_rc = handle_list_request(client_fd, config, &info);
+                break;
+            case MC_CMD_AUTH:
+                handler_rc = handle_auth_request(client_fd, config, &info, &authenticated);
                 break;
             case MC_CMD_QUIT:
                 if (info.header.payload_len > 0) {
@@ -487,9 +558,22 @@ int mc_server_run(const mc_server_config_t *config) {
         return -1;
     }
 
-    printf("Mini Cloud server listening on port %u (storage=%s)\n",
+    const char *auth_mode = (config->auth_token && config->auth_token[0]) ? "required" : "disabled";
+    char limit_buf[64];
+    if (config->max_upload_bytes > 0) {
+        snprintf(limit_buf,
+                 sizeof(limit_buf),
+                 "%llu bytes",
+                 (unsigned long long)config->max_upload_bytes);
+    } else {
+        snprintf(limit_buf, sizeof(limit_buf), "unlimited");
+    }
+
+    printf("Mini Cloud server listening on port %u (storage=%s, auth=%s, max_upload=%s)\n",
            config->port,
-           config->storage_dir);
+           config->storage_dir,
+           auth_mode,
+           limit_buf);
     fflush(stdout);
 
     while (!g_should_terminate) {
@@ -505,10 +589,10 @@ int mc_server_run(const mc_server_config_t *config) {
         }
 
         pid_t pid = fork(); /* fork() 시스템 콜로 자식 프로세스 생성 */
-        if (pid == -1) {
-            perror("fork");
-            close(client_fd);
-            continue;
+        if (pid == 0) {
+            close(listen_fd); /* close() 시스템 콜로 부모 리스너 fd 정리 */
+            handle_client(client_fd, &client_addr, config);
+            close(client_fd); /* close() 시스템 콜로 클라이언트 소켓 정리 */
         }
 
         if (pid == 0) {

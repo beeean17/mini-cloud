@@ -10,6 +10,7 @@ extern "C" {
 typedef struct {
     const char *host;
     uint16_t port;
+    const char *auth_token;
 } mc_client_config_t;
 
 int mc_client_run(const mc_client_config_t *config);

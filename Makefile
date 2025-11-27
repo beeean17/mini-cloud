@@ -68,11 +68,12 @@ client: $(BIN_DIR)/client
 test-server: $(BIN_DIR)/server $(BIN_DIR)/smoke_client
 	@bash -c 'set -euo pipefail; \
 	PORT=9400; \
+	AUTH_TOKEN="smoke-secret"; \
 	LOG=$$(mktemp -t mc-server-log.XXXXXX); \
-	./$(BIN_DIR)/server $$PORT > $$LOG 2>&1 & \
+	MC_SERVER_TOKEN="$$AUTH_TOKEN" ./$(BIN_DIR)/server $$PORT > $$LOG 2>&1 & \
 	SERVER_PID=$$!; \
 	sleep 1; \
-	./$(BIN_DIR)/smoke_client 127.0.0.1 $$PORT; \
+	MC_CLIENT_TOKEN="$$AUTH_TOKEN" ./$(BIN_DIR)/smoke_client 127.0.0.1 $$PORT; \
 	kill -INT $$SERVER_PID 2>/dev/null || true; \
 	wait $$SERVER_PID 2>/dev/null || true; \
 	echo "Server smoke test log (port $$PORT):"; \
@@ -85,20 +86,26 @@ clean:
 test-client: $(BIN_DIR)/server $(BIN_DIR)/client
 	@bash -c 'set -euo pipefail; \
 	PORT=9500; \
+	AUTH_TOKEN="client-secret"; \
+	UPLOAD_LIMIT=1024; \
 	TMP_UPLOAD=$$(mktemp -t mc-upload.XXXXXX); \
 	echo "hello from client" > $$TMP_UPLOAD; \
 	BASENAME=$$(basename $$TMP_UPLOAD); \
-	./$(BIN_DIR)/server $$PORT >/tmp/mc-client-server.log 2>&1 & \
+	BIG_FILE=$$(mktemp -t mc-big-upload.XXXXXX); \
+	head -c 2048 /dev/zero > $$BIG_FILE; \
+	MC_SERVER_TOKEN="$$AUTH_TOKEN" MC_MAX_UPLOAD_BYTES="$$UPLOAD_LIMIT" ./$(BIN_DIR)/server $$PORT >/tmp/mc-client-server.log 2>&1 & \
 	SERVER_PID=$$!; \
 	sleep 1; \
-	printf "LIST\nUPLOAD $$TMP_UPLOAD\nDOWNLOAD $$BASENAME\nQUIT\n" | ./$(BIN_DIR)/client 127.0.0.1 $$PORT >/tmp/mc-client.log 2>&1; \
+	printf "LIST\nUPLOAD $$TMP_UPLOAD\nDOWNLOAD $$BASENAME\nUPLOAD $$BIG_FILE\nQUIT\n" | \
+	MC_CLIENT_TOKEN="$$AUTH_TOKEN" ./$(BIN_DIR)/client 127.0.0.1 $$PORT >/tmp/mc-client.log 2>&1; \
 	kill -INT $$SERVER_PID 2>/dev/null || true; \
 	wait $$SERVER_PID 2>/dev/null || true; \
 	diff -q $$TMP_UPLOAD $$BASENAME >/tmp/mc-diff.log; \
+	grep -q "exceeds limit" /tmp/mc-client.log; \
 	echo "Client log:"; cat /tmp/mc-client.log; \
 	echo "Server log:"; cat /tmp/mc-client-server.log; \
 	echo "Diff log:"; cat /tmp/mc-diff.log; \
-	rm -f $$TMP_UPLOAD $$BASENAME /tmp/mc-client.log /tmp/mc-client-server.log /tmp/mc-diff.log'
+	rm -f $$TMP_UPLOAD $$BASENAME $$BIG_FILE /tmp/mc-client.log /tmp/mc-client-server.log /tmp/mc-diff.log'
 
 test-stress:
 	@tests/multi_client.sh

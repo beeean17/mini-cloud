@@ -24,7 +24,8 @@ typedef enum {
     MC_CMD_UPLOAD = 1,
     MC_CMD_DOWNLOAD = 2,
     MC_CMD_LIST = 3,
-    MC_CMD_QUIT = 4
+    MC_CMD_QUIT = 4,
+    MC_CMD_AUTH = 5
 } mc_command_t;
 
 #pragma pack(push, 1)
