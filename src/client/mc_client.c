@@ -27,6 +27,7 @@ typedef enum {
     CLI_ACTION_UPLOAD,
     CLI_ACTION_DOWNLOAD,
     CLI_ACTION_DOWNLOAD_ALL,
+    CLI_ACTION_DELETE,
     CLI_ACTION_LIST,
     CLI_ACTION_QUIT
 } cli_action_t;
@@ -141,6 +142,10 @@ static int send_quit(int fd) {
 
 static int send_download(int fd, const char *remote_name) {
     return send_header_and_filename(fd, MC_CMD_DOWNLOAD, remote_name, 0);
+}
+
+static int send_delete(int fd, const char *remote_name) {
+    return send_header_and_filename(fd, MC_CMD_DELETE, remote_name, 0);
 }
 
 static int send_auth(int fd, const char *token) {
@@ -377,6 +382,20 @@ static bool parse_command(const char *line_in, cli_request_t *out) {
                 }
             }
         }
+    } else if (strcmp(cmd, "delete") == 0) {
+        req.action = CLI_ACTION_DELETE;
+        char *tok = NULL;
+        while ((tok = strtok_r(NULL, " \t", &save)) != NULL) {
+            if (!append_request_arg(&req, tok)) {
+                free(line);
+                return false;
+            }
+        }
+        if (req.arg_count == 0) {
+            fprintf(stderr, "DELETE 명령에는 하나 이상의 파일명이 필요합니다.\n");
+            free(line);
+            return false;
+        }
     } else if (strcmp(cmd, "list") == 0) {
         if (strtok_r(NULL, " \t", &save)) {
             fprintf(stderr, "LIST 명령에는 추가 인자가 필요 없습니다.\n");
@@ -414,7 +433,7 @@ static void print_prompt(void) {
 }
 
 static void print_help(void) {
-    puts("지원 명령: UPLOAD <path...>, DOWNLOAD <filename...>, DOWNLOAD ALL, LIST, QUIT");
+    puts("지원 명령: UPLOAD <path...>, DOWNLOAD <filename...>, DOWNLOAD ALL, DELETE <filename...>, LIST, QUIT");
 }
 
 static int handle_server_response(int fd, const cli_request_t *req, bool *should_exit);
@@ -528,6 +547,13 @@ static int handle_server_response(int fd, const cli_request_t *req, bool *should
                 return -1;
             }
             printf("[CLIENT] 서버 파일 목록:\n%s", buffer);
+            free(buffer);
+            return 0;
+        case MC_CMD_DELETE:
+            if (recv_payload_to_buffer(fd, payload_len, &buffer) != 0) {
+                return -1;
+            }
+            printf("[CLIENT] 삭제 응답: %s\n", buffer);
             free(buffer);
             return 0;
         case MC_CMD_DOWNLOAD:
@@ -676,6 +702,32 @@ static int command_loop(int fd) {
                 rc = download_all_files(fd);
                 response_handled = true;
                 break;
+            case CLI_ACTION_DELETE:
+                response_handled = true;
+                if (req.arg_count == 0) {
+                    fprintf(stderr, "삭제할 파일이 지정되지 않았습니다.\n");
+                    rc = -1;
+                    break;
+                }
+                for (size_t i = 0; i < req.arg_count; ++i) {
+                    const char *name = req.args[i];
+                    printf("[CLIENT] 삭제 요청: %s\n", name);
+                    snprintf(req.arg, sizeof(req.arg), "%s", name);
+                    if (send_delete(fd, name) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    bool exit_after = false;
+                    if (handle_server_response(fd, &req, &exit_after) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    if (exit_after) {
+                        exit_main = true;
+                        break;
+                    }
+                }
+                break;
             case CLI_ACTION_LIST:
                 printf("[CLIENT] LIST 요청 전송\n");
                 rc = send_list(fd);
@@ -689,8 +741,14 @@ static int command_loop(int fd) {
         }
 
         if (rc != 0) {
-            perror("client-command");
-            break;
+            if (errno != 0) {
+                perror("client-command");
+            }
+            if (exit_main) {
+                break;
+            }
+            errno = 0;
+            continue;
         }
 
         if (!response_handled) {
