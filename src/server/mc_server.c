@@ -367,6 +367,35 @@ static int handle_download_request(int client_fd,
     return rc;
 }
 
+static int handle_delete_request(int client_fd,
+                                 const mc_server_config_t *config,
+                                 const mc_packet_info_t *info) {
+    if (info->header.payload_len > 0) {
+        drain_payload(client_fd, info->header.payload_len);
+    }
+
+    if (!info->filename[0]) {
+        return send_errorf(client_fd, "DELETE requires filename");
+    }
+    if (!is_safe_filename(info->filename)) {
+        return send_errorf(client_fd, "Invalid filename");
+    }
+
+    char target_path[MC_STORAGE_PATH_MAX];
+    if (build_storage_path(config, info->filename, target_path, sizeof(target_path)) != 0) {
+        return send_errorf(client_fd, "Path too long");
+    }
+
+    if (unlink(target_path) == -1) {
+        if (errno == ENOENT) {
+            return send_errorf(client_fd, "File not found");
+        }
+        return send_errorf(client_fd, "Failed to delete file: %s", strerror(errno));
+    }
+
+    return send_message(client_fd, MC_CMD_DELETE, info->filename, "DELETE OK");
+}
+
 static int handle_list_request(int client_fd, const mc_server_config_t *config, const mc_packet_info_t *info) {
     if (info->header.payload_len > 0) {
         drain_payload(client_fd, info->header.payload_len);
@@ -518,6 +547,9 @@ static void handle_client(int client_fd, const struct sockaddr_in *addr, const m
                 break;
             case MC_CMD_LIST:
                 handler_rc = handle_list_request(client_fd, config, &info);
+                break;
+            case MC_CMD_DELETE:
+                handler_rc = handle_delete_request(client_fd, config, &info);
                 break;
             case MC_CMD_AUTH:
                 handler_rc = handle_auth_request(client_fd, config, &info, &authenticated);
