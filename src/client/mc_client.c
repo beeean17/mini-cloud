@@ -13,17 +13,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #define MC_CLIENT_READ_CHUNK 4096
+#define MC_CLIENT_MAX_BATCH 32
 
 typedef enum {
     CLI_ACTION_NONE = 0,
     CLI_ACTION_UPLOAD,
     CLI_ACTION_DOWNLOAD,
+    CLI_ACTION_DOWNLOAD_ALL,
     CLI_ACTION_LIST,
     CLI_ACTION_QUIT
 } cli_action_t;
@@ -31,6 +34,8 @@ typedef enum {
 typedef struct {
     cli_action_t action;
     char arg[MC_MAX_FILENAME_LEN + 1];
+    size_t arg_count;
+    char args[MC_CLIENT_MAX_BATCH][MC_MAX_FILENAME_LEN + 1];
 } cli_request_t;
 
 static void lowercase(char *s) {
@@ -61,6 +66,26 @@ static const char *basename_safe(const char *path) {
         return path;
     }
     return slash + 1;
+}
+
+static bool append_request_arg(cli_request_t *req, const char *value) {
+    if (!req || !value || *value == '\0') {
+        return false;
+    }
+    if (req->arg_count >= MC_CLIENT_MAX_BATCH) {
+        fprintf(stderr, "인자 개수가 너무 많습니다 (최대 %d).\n", MC_CLIENT_MAX_BATCH);
+        return false;
+    }
+    if (strlen(value) > MC_MAX_FILENAME_LEN) {
+        fprintf(stderr, "파일명이 너무 깁니다 (최대 %d).\n", MC_MAX_FILENAME_LEN);
+        return false;
+    }
+    snprintf(req->args[req->arg_count], sizeof(req->args[req->arg_count]), "%s", value);
+    if (req->arg_count == 0) {
+        snprintf(req->arg, sizeof(req->arg), "%s", value);
+    }
+    req->arg_count++;
+    return true;
 }
 
 static int connect_to_server(const mc_client_config_t *config) {
@@ -309,41 +334,62 @@ static bool parse_command(const char *line_in, cli_request_t *out) {
     char *cmd = strtok_r(trimmed, " \t", &save);
     lowercase(cmd);
 
-    char *arg = strtok_r(NULL, "", &save);
-    if (arg) {
-        arg = trim(arg);
-    }
-
     cli_request_t req = {0};
     if (strcmp(cmd, "upload") == 0) {
-        if (!arg || *arg == '\0') {
-            fprintf(stderr, "UPLOAD 명령에는 로컬 파일 경로가 필요합니다.\n");
-            free(line);
-            return false;
-        }
-        if (strlen(arg) > MC_MAX_FILENAME_LEN) {
-            fprintf(stderr, "파일명이 너무 깁니다 (최대 %d).\n", MC_MAX_FILENAME_LEN);
-            free(line);
-            return false;
-        }
         req.action = CLI_ACTION_UPLOAD;
-        strncpy(req.arg, arg, sizeof(req.arg) - 1);
+        char *tok = NULL;
+        while ((tok = strtok_r(NULL, " \t", &save)) != NULL) {
+            if (!append_request_arg(&req, tok)) {
+                free(line);
+                return false;
+            }
+        }
+        if (req.arg_count == 0) {
+            fprintf(stderr, "UPLOAD 명령에는 하나 이상의 파일 경로가 필요합니다.\n");
+            free(line);
+            return false;
+        }
     } else if (strcmp(cmd, "download") == 0) {
-        if (!arg || *arg == '\0') {
+        char *first = strtok_r(NULL, " \t", &save);
+        if (!first) {
             fprintf(stderr, "DOWNLOAD 명령에는 서버 파일명이 필요합니다.\n");
             free(line);
             return false;
         }
-        if (strlen(arg) > MC_MAX_FILENAME_LEN) {
-            fprintf(stderr, "파일명이 너무 깁니다 (최대 %d).\n", MC_MAX_FILENAME_LEN);
+        if (strcasecmp(first, "all") == 0) {
+            if (strtok_r(NULL, " \t", &save) != NULL) {
+                fprintf(stderr, "DOWNLOAD ALL 명령에는 추가 인자를 넣을 수 없습니다.\n");
+                free(line);
+                return false;
+            }
+            req.action = CLI_ACTION_DOWNLOAD_ALL;
+        } else {
+            req.action = CLI_ACTION_DOWNLOAD;
+            if (!append_request_arg(&req, first)) {
+                free(line);
+                return false;
+            }
+            char *tok = NULL;
+            while ((tok = strtok_r(NULL, " \t", &save)) != NULL) {
+                if (!append_request_arg(&req, tok)) {
+                    free(line);
+                    return false;
+                }
+            }
+        }
+    } else if (strcmp(cmd, "list") == 0) {
+        if (strtok_r(NULL, " \t", &save)) {
+            fprintf(stderr, "LIST 명령에는 추가 인자가 필요 없습니다.\n");
             free(line);
             return false;
         }
-        req.action = CLI_ACTION_DOWNLOAD;
-        strncpy(req.arg, arg, sizeof(req.arg) - 1);
-    } else if (strcmp(cmd, "list") == 0) {
         req.action = CLI_ACTION_LIST;
     } else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+        if (strtok_r(NULL, " \t", &save)) {
+            fprintf(stderr, "QUIT 명령에는 추가 인자가 필요 없습니다.\n");
+            free(line);
+            return false;
+        }
         req.action = CLI_ACTION_QUIT;
     } else {
         fprintf(stderr, "알 수 없는 명령: %s\n", cmd);
@@ -368,7 +414,85 @@ static void print_prompt(void) {
 }
 
 static void print_help(void) {
-    puts("지원 명령: UPLOAD <path>, DOWNLOAD <filename>, LIST, QUIT");
+    puts("지원 명령: UPLOAD <path...>, DOWNLOAD <filename...>, DOWNLOAD ALL, LIST, QUIT");
+}
+
+static int handle_server_response(int fd, const cli_request_t *req, bool *should_exit);
+
+static int download_all_files(int fd) {
+    printf("[CLIENT] download-all: LIST 요청 전송\n");
+    if (send_list(fd) != 0) {
+        return -1;
+    }
+
+    mc_packet_info_t info;
+    if (recv_packet(fd, &info) != 0) {
+        return -1;
+    }
+
+    char *payload = NULL;
+    if (recv_payload_to_buffer(fd, info.header.payload_len, &payload) != 0) {
+        return -1;
+    }
+
+    if (info.header.command == MC_CMD_ERROR) {
+        fprintf(stderr, "[SERVER ERROR] %s\n", payload ? payload : "(no message)");
+        free(payload);
+        errno = EPROTO;
+        return -1;
+    }
+
+    if (info.header.command != MC_CMD_LIST) {
+        fprintf(stderr, "[CLIENT] LIST 응답이 아닙니다 (cmd=%u)\n", info.header.command);
+        free(payload);
+        errno = EPROTO;
+        return -1;
+    }
+
+    printf("[CLIENT] 서버 파일 목록:\n%s", payload);
+
+    size_t downloaded = 0;
+    char *saveptr = NULL;
+    char *line = strtok_r(payload, "\n", &saveptr);
+    while (line) {
+        if (line[0] == '\0' || strcmp(line, "(empty)") == 0) {
+            line = strtok_r(NULL, "\n", &saveptr);
+            continue;
+        }
+
+        cli_request_t req = {0};
+        req.action = CLI_ACTION_DOWNLOAD;
+        strncpy(req.arg, line, sizeof(req.arg) - 1);
+
+        printf("[CLIENT] download-all: %s\n", req.arg);
+        if (send_download(fd, req.arg) != 0) {
+            free(payload);
+            return -1;
+        }
+
+        bool exit_after = false;
+        if (handle_server_response(fd, &req, &exit_after) != 0) {
+            free(payload);
+            return -1;
+        }
+        if (exit_after) {
+            free(payload);
+            errno = ECONNRESET;
+            return -1;
+        }
+
+        ++downloaded;
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    if (downloaded == 0) {
+        printf("[CLIENT] 다운로드할 파일이 없습니다.\n");
+    } else {
+        printf("[CLIENT] download-all 완료: %zu개 파일\n", downloaded);
+    }
+
+    free(payload);
+    return 0;
 }
 
 static int handle_server_response(int fd, const cli_request_t *req, bool *should_exit) {
@@ -494,14 +618,63 @@ static int command_loop(int fd) {
         }
 
         int rc = 0;
+        bool response_handled = false;
+        bool exit_main = false;
         switch (req.action) {
             case CLI_ACTION_UPLOAD:
-                printf("[CLIENT] 업로드 시작: %s\n", req.arg);
-                rc = send_upload(fd, req.arg);
+                response_handled = true;
+                if (req.arg_count == 0) {
+                    fprintf(stderr, "업로드할 파일이 지정되지 않았습니다.\n");
+                    rc = -1;
+                    break;
+                }
+                for (size_t i = 0; i < req.arg_count; ++i) {
+                    const char *path = req.args[i];
+                    printf("[CLIENT] 업로드 시작: %s\n", path);
+                    if (send_upload(fd, path) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    bool exit_after = false;
+                    if (handle_server_response(fd, &req, &exit_after) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    if (exit_after) {
+                        exit_main = true;
+                        break;
+                    }
+                }
                 break;
             case CLI_ACTION_DOWNLOAD:
-                printf("[CLIENT] 다운로드 요청: %s\n", req.arg);
-                rc = send_download(fd, req.arg);
+                response_handled = true;
+                if (req.arg_count == 0) {
+                    fprintf(stderr, "다운로드할 파일이 지정되지 않았습니다.\n");
+                    rc = -1;
+                    break;
+                }
+                for (size_t i = 0; i < req.arg_count; ++i) {
+                    const char *name = req.args[i];
+                    printf("[CLIENT] 다운로드 요청: %s\n", name);
+                    snprintf(req.arg, sizeof(req.arg), "%s", name);
+                    if (send_download(fd, name) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    bool exit_after = false;
+                    if (handle_server_response(fd, &req, &exit_after) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    if (exit_after) {
+                        exit_main = true;
+                        break;
+                    }
+                }
+                break;
+            case CLI_ACTION_DOWNLOAD_ALL:
+                rc = download_all_files(fd);
+                response_handled = true;
                 break;
             case CLI_ACTION_LIST:
                 printf("[CLIENT] LIST 요청 전송\n");
@@ -520,12 +693,16 @@ static int command_loop(int fd) {
             break;
         }
 
-        bool exit_after = false;
-        if (handle_server_response(fd, &req, &exit_after) != 0) {
-            perror("client-response");
-            break;
-        }
-        if (exit_after) {
+        if (!response_handled) {
+            bool exit_after = false;
+            if (handle_server_response(fd, &req, &exit_after) != 0) {
+                perror("client-response");
+                break;
+            }
+            if (exit_after) {
+                break;
+            }
+        } else if (exit_main) {
             break;
         }
     }
