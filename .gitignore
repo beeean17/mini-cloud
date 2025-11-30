@@ -11,6 +11,7 @@ tmp/
 
 # Files for Deployment
 deploy/
+*.tgz
 
 # Personal or security-sensitive files (store actual copies under private/ submodule)
 *.pem
