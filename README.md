@@ -65,6 +65,12 @@ make test-stress
 | `MC_SERVER_BACKLOG` | `listen()` 백로그 크기 (기본 16, 1–1024 허용). |
 | `MC_STORAGE_DIR` | 2번째 인자를 생략한 경우 사용할 기본 저장소 디렉터리. |
 
+### 배포·패키징 가이드
+- `scripts/package.sh [버전]`을 실행하면 `dist/mini-cloud-<버전>.tar.gz`가 생성됩니다. (버전 미지정 시 UTC 타임스탬프 사용)
+- 아카이브에는 `bin/server`, `bin/client`, `deploy/README_DEPLOY.md`, `deploy/server.env.example`, `deploy/mini-cloud.service`, 빈 `storage/` 디렉터리가 포함됩니다.
+- `deploy/README_DEPLOY.md`를 참고해 `/opt/mini-cloud`에 압축을 해제하고 `/etc/mini-cloud/server.env`, `/etc/systemd/system/mini-cloud.service`를 설정하면 Oracle Cloud 같은 리눅스 서버에 즉시 배포할 수 있습니다.
+- 실제 배포 직전에는 `deploy/PRE_DEPLOY_CHECKLIST.md`를 따라 네트워크·보안·스토리지·롤백 항목을 모두 확인하세요.
+
 ### 파일 전송 동작
 - **UPLOAD `<path>`**: 로컬 파일을 서버 `storage/` 디렉터리에 업로드합니다. 서버는 임시 파일로 수신 후 원자적으로 교체하고, 클라이언트에는 성공 메시지를 반환합니다.
 - **DOWNLOAD `<filename>`**: 서버 저장소의 파일을 요청해 현재 디렉터리에 동일한 이름으로 저장합니다. 존재하지 않는 파일은 `MC_CMD_ERROR` 응답으로 안내됩니다.

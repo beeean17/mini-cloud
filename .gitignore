@@ -1,12 +1,16 @@
 # Build artifacts
 bin/
 build/
+dist/
 *.o
 *.out
 
 # Local storage and runtime directories
 storage/
 tmp/
+
+# Files for Deployment
+deploy/
 
 # Personal or security-sensitive files (store actual copies under private/ submodule)
 *.pem
@@ -20,6 +24,7 @@ secrets/
 *.log
 *.swp
 *.swo
+key/
 
 # Allow sensitive assets to exist inside private/ (private submodule)
 !private/**
